@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import copy
 import datetime
@@ -7,7 +6,6 @@ import json
 import logging
 import os
 import pathlib
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -19,18 +17,18 @@ from emhass.utils import set_df_index_freq
 class RetrieveHass:
     r"""
     Retrieve data from Home Assistant using the restful API.
-    
+
     This class allows the user to retrieve data from a Home Assistant instance \
     using the provided restful API (https://developers.home-assistant.io/docs/api/rest/)
-    
+
     This class methods are:
-        
+
     - get_data: to retrieve the actual data from hass
-    
+
     - prepare_data: to apply some data treatment in preparation for the optimization task
-    
+
     - post_data: Post passed data to hass
-    
+
     """
 
     def __init__(
@@ -42,7 +40,7 @@ class RetrieveHass:
         params: str,
         emhass_conf: dict,
         logger: logging.Logger,
-        get_data_from_file: Optional[bool] = False,
+        get_data_from_file: bool | None = False,
     ) -> None:
         """
         Define constructor for RetrieveHass class.
@@ -94,37 +92,37 @@ class RetrieveHass:
         if self.hass_url == "http://supervisor/core/api":
             url = self.hass_url + "/config"
         else:
-            if self.hass_url[-1] != '/':
+            if self.hass_url[-1] != "/":
                 self.logger.warning(
                     "Missing slash </> at the end of the defined URL, appending a slash but please fix your URL"
                 )
-                self.hass_url = self.hass_url + '/'
+                self.hass_url = self.hass_url + "/"
             url = self.hass_url + "api/config"
 
         try:
             response_config = get(url, headers=headers)
         except Exception:
-            self.logger.error("Unable to access Home Assistance instance, check URL")
+            self.logger.error("Unable to access Home Assistant instance, check URL")
             self.logger.error("If using addon, try setting url and token to 'empty'")
             return False
 
         try:
             self.ha_config = response_config.json()
         except Exception:
-            self.logger.error("EMHASS was unable to obtain configuration data from HA")
+            self.logger.error("EMHASS was unable to obtain configuration data from Home Assistant")
             return False
 
     def get_data(
         self,
         days_list: pd.date_range,
         var_list: list,
-        minimal_response: Optional[bool] = False,
-        significant_changes_only: Optional[bool] = False,
-        test_url: Optional[str] = "empty",
+        minimal_response: bool | None = False,
+        significant_changes_only: bool | None = False,
+        test_url: str | None = "empty",
     ) -> None:
         r"""
         Retrieve the actual data from hass.
-        
+
         :param days_list: A list of days to retrieve. The ISO format should be used \
             and the timezone is UTC. The frequency of the data_range should be freq='D'
         :type days_list: pandas.date_range
@@ -140,7 +138,7 @@ class RetrieveHass:
         :type significant_changes_only: bool, optional
         :return: The DataFrame populated with the retrieved data from hass
         :rtype: pandas.DataFrame
-        
+
         .. warning:: The minimal_response and significant_changes_only options \
             are experimental
         """
@@ -149,6 +147,8 @@ class RetrieveHass:
             "Authorization": "Bearer " + self.long_lived_token,
             "content-type": "application/json",
         }
+        # Remove empty strings from var_list
+        var_list = [var for var in var_list if var != ""]
         # Looping on each day from days list
         self.df_final = pd.DataFrame()
         x = 0  # iterate based on days
@@ -166,11 +166,11 @@ class RetrieveHass:
                             + var
                         )
                     else:  # Otherwise the Home Assistant Core API it is
-                        if self.hass_url[-1] != '/':
+                        if self.hass_url[-1] != "/":
                             self.logger.warning(
                                 "Missing slash </> at the end of the defined URL, appending a slash but please fix your URL"
                             )
-                            self.hass_url = self.hass_url + '/'
+                            self.hass_url = self.hass_url + "/"
                         url = (
                             self.hass_url
                             + "api/history/period/"
@@ -188,7 +188,7 @@ class RetrieveHass:
                     response = get(url, headers=headers)
                 except Exception:
                     self.logger.error(
-                        "Unable to access Home Assistance instance, check URL"
+                        "Unable to access Home Assistant instance, check URL"
                     )
                     self.logger.error(
                         "If using addon, try setting url and token to 'empty'"
@@ -197,17 +197,18 @@ class RetrieveHass:
                 else:
                     if response.status_code == 401:
                         self.logger.error(
-                            "Unable to access Home Assistance instance, TOKEN/KEY"
+                            "Unable to access Home Assistant instance, TOKEN/KEY"
                         )
                         self.logger.error(
                             "If using addon, try setting url and token to 'empty'"
                         )
                         return False
                     if response.status_code > 299:
-                        return f"Request Get Error: {response.status_code}"
+                        self.logger.error(f"Home assistant request GET error: {response.status_code} for var {var}")
+                        return False
                 """import bz2 # Uncomment to save a serialized data for tests
                 import _pickle as cPickle
-                with bz2.BZ2File("data/test_response_get_data_get_method.pbz2", "w") as f: 
+                with bz2.BZ2File("data/test_response_get_data_get_method.pbz2", "w") as f:
                     cPickle.dump(response, f)"""
                 try:  # Sometimes when there are connection problems we need to catch empty retrieved json
                     data = response.json()[0]
@@ -216,7 +217,7 @@ class RetrieveHass:
                         self.logger.error(
                             "The retrieved JSON is empty, A sensor:"
                             + var
-                            + " may have 0 days of history, passed sensor may not be correct, or days to retrieve is set too heigh"
+                            + " may have 0 days of history, passed sensor may not be correct, or days to retrieve is set too high. Check your Logger configuration, ensuring the sensors are in the include list."
                         )
                     else:
                         self.logger.error(
@@ -228,7 +229,6 @@ class RetrieveHass:
                         )
                     return False
                 df_raw = pd.DataFrame.from_dict(data)
-                # self.logger.info(str(df_raw))
                 if len(df_raw) == 0:
                     if x == 0:
                         self.logger.error(
@@ -245,7 +245,6 @@ class RetrieveHass:
                             + " (check your recorder settings)"
                         )
                     return False
-                # self.logger.info(self.freq.seconds)
                 if (
                     len(df_raw) < ((60 / (self.freq.seconds / 60)) * 24)
                     and x != len(days_list) - 1
@@ -269,7 +268,7 @@ class RetrieveHass:
                     ).max()
                     ts = pd.to_datetime(
                         pd.date_range(start=from_date, end=to_date, freq=self.freq),
-                        format="%Y-%d-%m %H:%M",
+                        format="%Y-%d-%m %H:%M"
                     ).round(self.freq, ambiguous="infer", nonexistent="shift_forward")
                     df_day = pd.DataFrame(index=ts)
                 # Caution with undefined string data: unknown, unavailable, etc.
@@ -303,14 +302,14 @@ class RetrieveHass:
     def prepare_data(
         self,
         var_load: str,
-        load_negative: Optional[bool] = False,
-        set_zero_min: Optional[bool] = True,
-        var_replace_zero: Optional[list] = None,
-        var_interp: Optional[list] = None,
+        load_negative: bool | None = False,
+        set_zero_min: bool | None = True,
+        var_replace_zero: list | None = None,
+        var_interp: list | None = None,
     ) -> None:
         r"""
         Apply some data treatment in preparation for the optimization task.
-        
+
         :param var_load: The name of the variable for the household load consumption.
         :type var_load: str
         :param load_negative: Set to True if the retrived load variable is \
@@ -328,8 +327,14 @@ class RetrieveHass:
         :return: The DataFrame populated with the retrieved data from hass and \
             after the data treatment
         :rtype: pandas.DataFrame
-        
+
         """
+        self.logger.debug("prepare_data self.var_list=%s", self.var_list)
+        self.logger.debug("prepare_data var_load=%s", var_load)
+        self.logger.debug("prepare_data load_negative=%s", load_negative)
+        self.logger.debug("prepare_data set_zero_min=%s", set_zero_min)
+        self.logger.debug("prepare_data var_replace_zero=%s", var_replace_zero)
+        self.logger.debug("prepare_data var_interp=%s", var_interp)
         try:
             if load_negative:  # Apply the correct sign to load power
                 self.df_final[var_load + "_positive"] = -self.df_final[var_load]
@@ -349,16 +354,26 @@ class RetrieveHass:
             )
             return False
         # Confirm var_replace_zero & var_interp contain only sensors contained in var_list
-        if isinstance(var_replace_zero, list) and all(
-            item in var_replace_zero for item in self.var_list
-        ):
-            pass
+        if isinstance(var_replace_zero, list):
+            original_list = var_replace_zero[:]
+            var_replace_zero = [
+                item for item in var_replace_zero if item in self.var_list
+            ]
+            removed = set(original_list) - set(var_replace_zero)
+            for item in removed:
+                self.logger.warning(
+                    f"Sensor '{item}' in var_replace_zero not found in self.var_list and has been removed."
+                )
         else:
             var_replace_zero = []
-        if isinstance(var_interp, list) and all(
-            item in var_interp for item in self.var_list
-        ):
-            pass
+        if isinstance(var_interp, list):
+            original_list = var_interp[:]
+            var_interp = [item for item in var_interp if item in self.var_list]
+            removed = set(original_list) - set(var_interp)
+            for item in removed:
+                self.logger.warning(
+                    f"Sensor '{item}' in var_interp not found in self.var_list and has been removed."
+                )
         else:
             var_interp = []
         # Apply minimum values
@@ -414,6 +429,7 @@ class RetrieveHass:
         data_df: pd.DataFrame,
         idx: int,
         entity_id: str,
+        device_class: str,
         unit_of_measurement: str,
         friendly_name: str,
         list_name: str,
@@ -430,8 +446,9 @@ class RetrieveHass:
             datum[entity_id.split("sensor.")[1]] = vals_list[i]
             forecast_list.append(datum)
         data = {
-            "state": "{:.2f}".format(state),
+            "state": f"{state:.2f}",
             "attributes": {
+                "device_class": device_class,
                 "unit_of_measurement": unit_of_measurement,
                 "friendly_name": friendly_name,
                 list_name: forecast_list,
@@ -444,18 +461,19 @@ class RetrieveHass:
         data_df: pd.DataFrame,
         idx: int,
         entity_id: str,
+        device_class: str,
         unit_of_measurement: str,
         friendly_name: str,
         type_var: str,
-        from_mlforecaster: Optional[bool] = False,
-        publish_prefix: Optional[str] = "",
-        save_entities: Optional[bool] = False,
-        logger_levels: Optional[str] = "info",
-        dont_post: Optional[bool] = False,
+        from_mlforecaster: bool | None = False,
+        publish_prefix: str | None = "",
+        save_entities: bool | None = False,
+        logger_levels: str | None = "info",
+        dont_post: bool | None = False,
     ) -> None:
         r"""
         Post passed data to hass.
-        
+
         :param data_df: The DataFrame containing the data that will be posted \
             to hass. This should be a one columns DF or a series.
         :type data_df: pd.DataFrame
@@ -464,6 +482,8 @@ class RetrieveHass:
         :type idx: int
         :param entity_id: The unique entity_id of the sensor in hass.
         :type entity_id: str
+        :param device_class: The HASS device class for the sensor.
+        :type device_class: str
         :param unit_of_measurement: The units of the sensor.
         :type unit_of_measurement: str
         :param friendly_name: The friendly name that will be used in the hass frontend.
@@ -474,7 +494,7 @@ class RetrieveHass:
         :type publish_prefix: str, optional
         :param save_entities: if entity data should be saved in data_path/entities
         :type save_entities: bool, optional
-        :param logger_levels: set logger level, info or debug, to output  
+        :param logger_levels: set logger level, info or debug, to output
         :type logger_levels: str, optional
         :param dont_post: dont post to HA
         :type dont_post: bool, optional
@@ -511,6 +531,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "forecasts",
@@ -521,6 +542,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "deferrables_schedule",
@@ -531,6 +553,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "predicted_temperatures",
@@ -541,6 +564,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "battery_scheduled_power",
@@ -551,6 +575,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "battery_scheduled_soc",
@@ -561,6 +586,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "unit_load_cost_forecasts",
@@ -571,6 +597,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "unit_prod_price_forecasts",
@@ -581,6 +608,7 @@ class RetrieveHass:
                 data_df,
                 idx,
                 entity_id,
+                device_class,
                 unit_of_measurement,
                 friendly_name,
                 "scheduled_forecast",
@@ -590,6 +618,7 @@ class RetrieveHass:
             data = {
                 "state": state,
                 "attributes": {
+                    "device_class": device_class,
                     "unit_of_measurement": unit_of_measurement,
                     "friendly_name": friendly_name,
                 },
@@ -598,14 +627,16 @@ class RetrieveHass:
             data = {
                 "state": state,
                 "attributes": {
+                    "device_class": device_class,
                     "unit_of_measurement": unit_of_measurement,
                     "friendly_name": friendly_name,
                 },
             }
         else:
             data = {
-                "state": "{:.2f}".format(state),
+                "state": f"{state:.2f}",
                 "attributes": {
+                    "device_class": device_class,
                     "unit_of_measurement": unit_of_measurement,
                     "friendly_name": friendly_name,
                 },
@@ -649,7 +680,7 @@ class RetrieveHass:
 
                 # Save the required metadata to json file
                 if os.path.isfile(entities_path / "metadata.json"):
-                    with open(entities_path / "metadata.json", "r") as file:
+                    with open(entities_path / "metadata.json") as file:
                         metadata = json.load(file)
                 else:
                     metadata = {}
@@ -657,6 +688,7 @@ class RetrieveHass:
                     # Save entity metadata, key = entity_id
                     metadata[entity_id] = {
                         "name": data_df.name,
+                        "device_class": device_class,
                         "unit_of_measurement": unit_of_measurement,
                         "friendly_name": friendly_name,
                         "type_var": type_var,

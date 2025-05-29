@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-import copy
 import logging
 import time
 import warnings
-from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +16,8 @@ from sklearn.linear_model import ElasticNet, LinearRegression
 from sklearn.metrics import r2_score
 from sklearn.neighbors import KNeighborsRegressor
 
+from emhass import utils
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
@@ -26,17 +25,17 @@ class MLForecaster:
     r"""
     A forecaster class using machine learning models with auto-regressive approach and features\
     based on timestamp information (hour, day, week, etc).
-    
+
     This class uses the `skforecast` module and the machine learning models are from `scikit-learn`.
-    
+
     It exposes three main methods:
-    
+
     - `fit`: to train a model with the passed data.
-    
+
     - `predict`: to obtain a forecast from a pre-trained model.
-    
-    - `tune`: to optimize the models hyperparameters using bayesian optimization. 
-    
+
+    - `tune`: to optimize the models hyperparameters using bayesian optimization.
+
     """
 
     def __init__(
@@ -85,24 +84,6 @@ class MLForecaster:
         self.data = self.data[~self.data.index.duplicated(keep="first")]
 
     @staticmethod
-    def add_date_features(data: pd.DataFrame) -> pd.DataFrame:
-        """Add date features from the input DataFrame timestamp
-
-        :param data: The input DataFrame
-        :type data: pd.DataFrame
-        :return: The DataFrame with the added features
-        :rtype: pd.DataFrame
-        """
-        df = copy.deepcopy(data)
-        df["year"] = [i.year for i in df.index]
-        df["month"] = [i.month for i in df.index]
-        df["day_of_week"] = [i.dayofweek for i in df.index]
-        df["day_of_year"] = [i.dayofyear for i in df.index]
-        df["day"] = [i.day for i in df.index]
-        df["hour"] = [i.hour for i in df.index]
-        return df
-
-    @staticmethod
     def neg_r2_score(y_true, y_pred):
         """The negative of the r2 score."""
         return -r2_score(y_true, y_pred)
@@ -116,14 +97,14 @@ class MLForecaster:
             freq=data_last_window.index.freq,
         )
         exog = pd.DataFrame({var_name: [np.nan] * periods}, index=forecast_dates)
-        exog = MLForecaster.add_date_features(exog)
+        exog = utils.add_date_features(exog)
         return exog
 
     def fit(
         self,
-        split_date_delta: Optional[str] = "48h",
-        perform_backtest: Optional[bool] = False,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        split_date_delta: str | None = "48h",
+        perform_backtest: bool | None = False,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         r"""The fit method to train the ML model.
 
         :param split_date_delta: The delta from now to `split_date_delta` that will be used \
@@ -138,7 +119,7 @@ class MLForecaster:
         self.logger.info("Performing a forecast model fit for " + self.model_type)
         # Preparing the data: adding exogenous features
         self.data_exo = pd.DataFrame(index=self.data.index)
-        self.data_exo = MLForecaster.add_date_features(self.data_exo)
+        self.data_exo = utils.add_date_features(self.data_exo)
         self.data_exo[self.var_model] = self.data[self.var_model]
         self.data_exo = self.data_exo.interpolate(method="linear", axis=0, limit=None)
         # train/test split
@@ -225,7 +206,7 @@ class MLForecaster:
             df_pred_backtest["pred"] = predictions_backtest
         return df_pred, df_pred_backtest
 
-    def predict(self, data_last_window: Optional[pd.DataFrame] = None) -> pd.Series:
+    def predict(self, data_last_window: pd.DataFrame | None = None) -> pd.Series:
         """The predict method to generate forecasts from a previously fitted ML model.
 
         :param data_last_window: The data that will be used to generate the new forecast, this \
@@ -264,7 +245,7 @@ class MLForecaster:
                 )
         return predictions
 
-    def tune(self, debug: Optional[bool] = False) -> pd.DataFrame:
+    def tune(self, debug: bool | None = False) -> pd.DataFrame:
         """Tuning a previously fitted model using bayesian optimization.
 
         :param debug: Set to True for testing and faster optimizations, defaults to False

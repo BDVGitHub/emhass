@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import argparse
 import copy
@@ -10,9 +9,8 @@ import pathlib
 import pickle
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import version
-from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +26,132 @@ default_csv_filename = "opt_res_latest.csv"
 default_pkl_suffix = "_mlf.pkl"
 default_metadata_json = "metadata.json"
 
+
+def retrieve_home_assistant_data(
+    set_type: str,
+    get_data_from_file: bool,
+    retrieve_hass_conf: dict,
+    optim_conf: dict,
+    rh: RetrieveHass,
+    emhass_conf: dict,
+    test_df_literal: pd.DataFrame,
+) -> dict:
+    """Retrieve data from Home Assistant or file and prepare it for optimization."""
+    if get_data_from_file:
+        with open(emhass_conf["data_path"] / test_df_literal, "rb") as inp:
+            rh.df_final, days_list, var_list, rh.ha_config = pickle.load(inp)
+            rh.var_list = var_list
+        # Assign variables based on set_type
+        retrieve_hass_conf["sensor_power_load_no_var_loads"] = str(var_list[0])
+        if optim_conf.get("set_use_pv", True):
+            retrieve_hass_conf["sensor_power_photovoltaics"] = str(var_list[1])
+            retrieve_hass_conf["sensor_linear_interp"] = [
+                retrieve_hass_conf["sensor_power_photovoltaics"],
+                retrieve_hass_conf["sensor_power_load_no_var_loads"],
+            ]
+            retrieve_hass_conf["sensor_replace_zero"] = [
+                retrieve_hass_conf["sensor_power_photovoltaics"],
+                var_list[2],
+            ]
+        else:
+            retrieve_hass_conf["sensor_linear_interp"] = [
+                retrieve_hass_conf["sensor_power_load_no_var_loads"]
+            ]
+            retrieve_hass_conf["sensor_replace_zero"] = []
+    else:
+        # Determine days_list based on set_type
+        if set_type == "perfect-optim" or set_type == "adjust_pv":
+            days_list = utils.get_days_list(
+                retrieve_hass_conf["historic_days_to_retrieve"]
+            )
+        elif set_type == "naive-mpc-optim":
+            days_list = utils.get_days_list(1)
+        else:
+            days_list = None  # Not needed for dayahead
+        var_list = [retrieve_hass_conf["sensor_power_load_no_var_loads"]]
+        if optim_conf.get("set_use_pv", True):
+            var_list.append(retrieve_hass_conf["sensor_power_photovoltaics"])
+            if optim_conf.get("set_use_adjusted_pv", True):
+                var_list.append(retrieve_hass_conf["sensor_power_photovoltaics_forecast"])
+        if not rh.get_data(
+            days_list, var_list, minimal_response=False, significant_changes_only=False
+        ):
+            return False, None, days_list
+    rh.prepare_data(
+        retrieve_hass_conf["sensor_power_load_no_var_loads"],
+        load_negative=retrieve_hass_conf["load_negative"],
+        set_zero_min=retrieve_hass_conf["set_zero_min"],
+        var_replace_zero=retrieve_hass_conf["sensor_replace_zero"],
+        var_interp=retrieve_hass_conf["sensor_linear_interp"],
+    )
+    return True, rh.df_final.copy(), days_list
+
+
+def adjust_pv_forecast(
+    logger: logging.Logger,
+    fcst: Forecast,
+    P_PV_forecast: pd.Series,
+    get_data_from_file: bool,
+    retrieve_hass_conf: dict,
+    optim_conf: dict,
+    rh: RetrieveHass,
+    emhass_conf: dict,
+    test_df_literal: pd.DataFrame,
+) -> pd.Series:
+    """
+    Adjust the photovoltaic (PV) forecast using historical data and a regression model.
+
+    This method retrieves historical data, prepares it for model fitting, trains a regression
+    model, and adjusts the provided PV forecast based on the trained model.
+
+    :param logger: Logger object for logging information and errors.
+    :type logger: logging.Logger
+    :param fcst: Forecast object used for PV forecast adjustment.
+    :type fcst: Forecast
+    :param P_PV_forecast: The initial PV forecast to be adjusted.
+    :type P_PV_forecast: pd.Series
+    :param get_data_from_file: Whether to retrieve data from a file instead of Home Assistant.
+    :type get_data_from_file: bool
+    :param retrieve_hass_conf: Configuration dictionary for retrieving data from Home Assistant.
+    :type retrieve_hass_conf: dict
+    :param optim_conf: Configuration dictionary for optimization settings.
+    :type optim_conf: dict
+    :param rh: RetrieveHass object for interacting with Home Assistant.
+    :type rh: RetrieveHass
+    :param emhass_conf: Configuration dictionary for emhass paths and settings.
+    :type emhass_conf: dict
+    :param test_df_literal: DataFrame containing test data for debugging purposes.
+    :type test_df_literal: pd.DataFrame
+    :return: The adjusted PV forecast as a pandas Series.
+    :rtype: pd.Series
+    """
+    logger.info("Adjusting PV forecast, retrieving history data for model fit")
+    # Retrieve data from Home Assistant
+    success, df_input_data, _ = retrieve_home_assistant_data(
+        "adjust_pv",
+        get_data_from_file,
+        retrieve_hass_conf,
+        optim_conf,
+        rh,
+        emhass_conf,
+        test_df_literal,
+    )
+    if not success:
+        return False
+    # Call data preparation method
+    fcst.adjust_pv_forecast_data_prep(df_input_data)
+    # Call the fit method
+    fcst.adjust_pv_forecast_fit(
+        n_splits=5,
+        regression_model=optim_conf["adjusted_pv_regression_model"],
+    )
+    # Call the predict method
+    P_PV_forecast = P_PV_forecast.rename("forecast").to_frame()
+    P_PV_forecast = fcst.adjust_pv_forecast_predict(forecasted_pv=P_PV_forecast)
+    # Update the PV forecast
+    return P_PV_forecast["adjusted_forecast"].rename(None)
+
+
 def set_input_data_dict(
     emhass_conf: dict,
     costfun: str,
@@ -35,7 +159,7 @@ def set_input_data_dict(
     runtimeparams: str,
     set_type: str,
     logger: logging.Logger,
-    get_data_from_file: Optional[bool] = False,
+    get_data_from_file: bool | None = False,
 ) -> dict:
     """
     Set up some of the data needed for the different actions.
@@ -136,42 +260,17 @@ def set_input_data_dict(
     # Perform setup based on type of action
     if set_type == "perfect-optim":
         # Retrieve data from hass
-        if get_data_from_file:
-            with open(emhass_conf["data_path"] / test_df_literal, "rb") as inp:
-                rh.df_final, days_list, var_list, rh.ha_config = pickle.load(inp)
-            retrieve_hass_conf["sensor_power_load_no_var_loads"] = str(var_list[0])
-            retrieve_hass_conf["sensor_power_photovoltaics"] = str(var_list[1])
-            retrieve_hass_conf["sensor_linear_interp"] = [
-                retrieve_hass_conf["sensor_power_photovoltaics"],
-                retrieve_hass_conf["sensor_power_load_no_var_loads"],
-            ]
-            retrieve_hass_conf["sensor_replace_zero"] = [
-                retrieve_hass_conf["sensor_power_photovoltaics"]
-            ]
-        else:
-            days_list = utils.get_days_list(
-                retrieve_hass_conf["historic_days_to_retrieve"]
-            )
-            var_list = [
-                retrieve_hass_conf["sensor_power_load_no_var_loads"],
-                retrieve_hass_conf["sensor_power_photovoltaics"],
-            ]
-            if not rh.get_data(
-                days_list,
-                var_list,
-                minimal_response=False,
-                significant_changes_only=False,
-            ):
-                return False
-        if not rh.prepare_data(
-            retrieve_hass_conf["sensor_power_load_no_var_loads"],
-            load_negative=retrieve_hass_conf["load_negative"],
-            set_zero_min=retrieve_hass_conf["set_zero_min"],
-            var_replace_zero=retrieve_hass_conf["sensor_replace_zero"],
-            var_interp=retrieve_hass_conf["sensor_linear_interp"],
-        ):
+        success, df_input_data, days_list = retrieve_home_assistant_data(
+            set_type,
+            get_data_from_file,
+            retrieve_hass_conf,
+            optim_conf,
+            rh,
+            emhass_conf,
+            test_df_literal,
+        )
+        if not success:
             return False
-        df_input_data = rh.df_final.copy()
         # What we don't need for this type of action
         P_PV_forecast, P_load_forecast, df_input_data_dayahead = None, None, None
     elif set_type == "dayahead-optim":
@@ -186,9 +285,24 @@ def set_input_data_dict(
             if isinstance(df_weather, bool) and not df_weather:
                 return False
             P_PV_forecast = fcst.get_power_from_weather(df_weather)
+            # Adjust PV forecast
+            if optim_conf["set_use_adjusted_pv"]:
+                # Update the PV forecast
+                P_PV_forecast = adjust_pv_forecast(
+                    logger,
+                    fcst,
+                    P_PV_forecast,
+                    get_data_from_file,
+                    retrieve_hass_conf,
+                    optim_conf,
+                    rh,
+                    emhass_conf,
+                    test_df_literal,
+                )
         else:
             P_PV_forecast = pd.Series(0, index=fcst.forecast_dates)
         P_load_forecast = fcst.get_load_forecast(
+            days_min_load_forecast=optim_conf["delta_forecast_daily"].days,
             method=optim_conf["load_forecast_method"]
         )
         if isinstance(P_load_forecast, bool) and not P_load_forecast:
@@ -233,41 +347,30 @@ def set_input_data_dict(
         # What we don't need for this type of action
         df_input_data, days_list = None, None
     elif set_type == "naive-mpc-optim":
-        # Retrieve data from hass
-        if get_data_from_file:
-            with open(emhass_conf["data_path"] / test_df_literal, "rb") as inp:
-                rh.df_final, days_list, var_list, rh.ha_config = pickle.load(inp)
-            retrieve_hass_conf["sensor_power_load_no_var_loads"] = str(var_list[0])
-            retrieve_hass_conf["sensor_power_photovoltaics"] = str(var_list[1])
-            retrieve_hass_conf["sensor_linear_interp"] = [
-                retrieve_hass_conf["sensor_power_photovoltaics"],
-                retrieve_hass_conf["sensor_power_load_no_var_loads"],
-            ]
-            retrieve_hass_conf["sensor_replace_zero"] = [
-                retrieve_hass_conf["sensor_power_photovoltaics"]
-            ]
-        else:
-            days_list = utils.get_days_list(1)
-            var_list = [
-                retrieve_hass_conf["sensor_power_load_no_var_loads"],
-                retrieve_hass_conf["sensor_power_photovoltaics"],
-            ]
-            if not rh.get_data(
-                days_list,
-                var_list,
-                minimal_response=False,
-                significant_changes_only=False,
-            ):
-                return False
-        if not rh.prepare_data(
-            retrieve_hass_conf["sensor_power_load_no_var_loads"],
-            load_negative=retrieve_hass_conf["load_negative"],
-            set_zero_min=retrieve_hass_conf["set_zero_min"],
-            var_replace_zero=retrieve_hass_conf["sensor_replace_zero"],
-            var_interp=retrieve_hass_conf["sensor_linear_interp"],
+        if (
+            optim_conf.get("load_forecast_method", None) == "list"
+            and optim_conf.get("weather_forecast_method", None) == "list"
+        ) or (
+            optim_conf.get("load_forecast_method", None) == "list"
+            and not (optim_conf["set_use_pv"])
         ):
-            return False
-        df_input_data = rh.df_final.copy()
+            days_list = None
+            set_mix_forecast = False
+            df_input_data = None
+        else:
+            # Retrieve data from hass
+            success, df_input_data, days_list = retrieve_home_assistant_data(
+                set_type,
+                get_data_from_file,
+                retrieve_hass_conf,
+                optim_conf,
+                rh,
+                emhass_conf,
+                test_df_literal,
+            )
+            if not success:
+                return False
+            set_mix_forecast = True
         # Get PV and load forecasts
         if (
             optim_conf["set_use_pv"]
@@ -279,13 +382,28 @@ def set_input_data_dict(
             if isinstance(df_weather, bool) and not df_weather:
                 return False
             P_PV_forecast = fcst.get_power_from_weather(
-                df_weather, set_mix_forecast=True, df_now=df_input_data
+                df_weather, set_mix_forecast=set_mix_forecast, df_now=df_input_data
             )
+            # Adjust PV forecast
+            if optim_conf["set_use_adjusted_pv"]:
+                # Update the PV forecast
+                P_PV_forecast = adjust_pv_forecast(
+                    logger,
+                    fcst,
+                    P_PV_forecast,
+                    get_data_from_file,
+                    retrieve_hass_conf,
+                    optim_conf,
+                    rh,
+                    emhass_conf,
+                    test_df_literal,
+                )
         else:
             P_PV_forecast = pd.Series(0, index=fcst.forecast_dates)
         P_load_forecast = fcst.get_load_forecast(
+            days_min_load_forecast=optim_conf["delta_forecast_daily"].days,
             method=optim_conf["load_forecast_method"],
-            set_mix_forecast=True,
+            set_mix_forecast=set_mix_forecast,
             df_now=df_input_data,
         )
         if isinstance(P_load_forecast, bool) and not P_load_forecast:
@@ -338,10 +456,10 @@ def set_input_data_dict(
         var_model = params["passed_data"]["var_model"]
         if get_data_from_file:
             days_list = None
-            filename = "data_train_" + model_type + ".pkl"
+            filename = model_type + ".pkl"
             filename_path = emhass_conf["data_path"] / filename
             with open(filename_path, "rb") as inp:
-                df_input_data, _ = pickle.load(inp)
+                df_input_data, _, _, _ = pickle.load(inp)
             df_input_data = df_input_data[
                 df_input_data.index[-1] - pd.offsets.Day(days_to_retrieve) :
             ]
@@ -470,8 +588,8 @@ def weather_forecast_cache(
 def perfect_forecast_optim(
     input_data_dict: dict,
     logger: logging.Logger,
-    save_data_to_file: Optional[bool] = True,
-    debug: Optional[bool] = False,
+    save_data_to_file: bool | None = True,
+    debug: bool | None = False,
 ) -> pd.DataFrame:
     """
     Perform a call to the perfect forecast optimization routine.
@@ -535,8 +653,8 @@ def perfect_forecast_optim(
 def dayahead_forecast_optim(
     input_data_dict: dict,
     logger: logging.Logger,
-    save_data_to_file: Optional[bool] = False,
-    debug: Optional[bool] = False,
+    save_data_to_file: bool | None = False,
+    debug: bool | None = False,
 ) -> pd.DataFrame:
     """
     Perform a call to the day-ahead optimization routine.
@@ -578,9 +696,7 @@ def dayahead_forecast_optim(
     )
     # Save CSV file for publish_data
     if save_data_to_file:
-        today = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         filename = "opt_res_dayahead_" + today.strftime("%Y_%m_%d") + ".csv"
     else:  # Just save the latest optimization results
         filename = default_csv_filename
@@ -608,8 +724,8 @@ def dayahead_forecast_optim(
 def naive_mpc_optim(
     input_data_dict: dict,
     logger: logging.Logger,
-    save_data_to_file: Optional[bool] = False,
-    debug: Optional[bool] = False,
+    save_data_to_file: bool | None = False,
+    debug: bool | None = False,
 ) -> pd.DataFrame:
     """
     Perform a call to the naive Model Predictive Controller optimization routine.
@@ -674,9 +790,7 @@ def naive_mpc_optim(
     )
     # Save CSV file for publish_data
     if save_data_to_file:
-        today = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         filename = "opt_res_naive_mpc_" + today.strftime("%Y_%m_%d") + ".csv"
     else:  # Just save the latest optimization results
         filename = default_csv_filename
@@ -702,8 +816,8 @@ def naive_mpc_optim(
 
 
 def forecast_model_fit(
-    input_data_dict: dict, logger: logging.Logger, debug: Optional[bool] = False
-) -> Tuple[pd.DataFrame, pd.DataFrame, MLForecaster]:
+    input_data_dict: dict, logger: logging.Logger, debug: bool | None = False
+) -> tuple[pd.DataFrame, pd.DataFrame, MLForecaster]:
     """Perform a forecast model fit from training data retrieved from Home Assistant.
 
     :param input_data_dict: A dictionnary with multiple data used by the action functions
@@ -742,15 +856,16 @@ def forecast_model_fit(
         filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
         with open(filename_path, "wb") as outp:
             pickle.dump(mlf, outp, pickle.HIGHEST_PROTOCOL)
+            logger.debug("saved model to " + str(filename_path))
     return df_pred, df_pred_backtest, mlf
 
 
 def forecast_model_predict(
     input_data_dict: dict,
     logger: logging.Logger,
-    use_last_window: Optional[bool] = True,
-    debug: Optional[bool] = False,
-    mlf: Optional[MLForecaster] = None,
+    use_last_window: bool | None = True,
+    debug: bool | None = False,
+    mlf: MLForecaster | None = None,
 ) -> pd.DataFrame:
     r"""Perform a forecast model predict using a previously trained skforecast model.
 
@@ -780,9 +895,12 @@ def forecast_model_predict(
         if filename_path.is_file():
             with open(filename_path, "rb") as inp:
                 mlf = pickle.load(inp)
+                logger.debug("loaded saved model from " + str(filename_path))
         else:
             logger.error(
-                "The ML forecaster file was not found, please run a model fit method before this predict method",
+                "The ML forecaster file ("
+                + str(filename_path)
+                + ") was not found, please run a model fit method before this predict method",
             )
             return
     # Make predictions
@@ -797,6 +915,9 @@ def forecast_model_predict(
     ]
     model_predict_entity_id = input_data_dict["params"]["passed_data"][
         "model_predict_entity_id"
+    ]
+    model_predict_device_class = input_data_dict["params"]["passed_data"][
+        "model_predict_device_class"
     ]
     model_predict_unit_of_measurement = input_data_dict["params"]["passed_data"][
         "model_predict_unit_of_measurement"
@@ -831,6 +952,7 @@ def forecast_model_predict(
             predictions,
             idx_closest,
             model_predict_entity_id,
+            model_predict_device_class,
             model_predict_unit_of_measurement,
             model_predict_friendly_name,
             type_var="mlforecaster",
@@ -842,9 +964,9 @@ def forecast_model_predict(
 def forecast_model_tune(
     input_data_dict: dict,
     logger: logging.Logger,
-    debug: Optional[bool] = False,
-    mlf: Optional[MLForecaster] = None,
-) -> Tuple[pd.DataFrame, MLForecaster]:
+    debug: bool | None = False,
+    mlf: MLForecaster | None = None,
+) -> tuple[pd.DataFrame, MLForecaster]:
     """Tune a forecast model hyperparameters using bayesian optimization.
 
     :param input_data_dict: A dictionnary with multiple data used by the action functions
@@ -867,9 +989,12 @@ def forecast_model_tune(
         if filename_path.is_file():
             with open(filename_path, "rb") as inp:
                 mlf = pickle.load(inp)
+                logger.debug("loaded saved model from " + str(filename_path))
         else:
             logger.error(
-                "The ML forecaster file was not found, please run a model fit method before this tune method",
+                "The ML forecaster file ("
+                + str(filename_path)
+                + ") was not found, please run a model fit method before this tune method",
             )
             return None, None
     # Tune the model
@@ -880,11 +1005,12 @@ def forecast_model_tune(
         filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
         with open(filename_path, "wb") as outp:
             pickle.dump(mlf, outp, pickle.HIGHEST_PROTOCOL)
+            logger.debug("Saved model to " + str(filename_path))
     return df_pred_optim, mlf
 
 
 def regressor_model_fit(
-    input_data_dict: dict, logger: logging.Logger, debug: Optional[bool] = False
+    input_data_dict: dict, logger: logging.Logger, debug: bool | None = False
 ) -> MLRegressor:
     """Perform a forecast model fit from training data retrieved from Home Assistant.
 
@@ -946,8 +1072,8 @@ def regressor_model_fit(
 def regressor_model_predict(
     input_data_dict: dict,
     logger: logging.Logger,
-    debug: Optional[bool] = False,
-    mlr: Optional[MLRegressor] = None,
+    debug: bool | None = False,
+    mlr: MLRegressor | None = None,
 ) -> np.ndarray:
     """Perform a prediction from csv file.
 
@@ -984,8 +1110,11 @@ def regressor_model_predict(
     mlr_predict_entity_id = input_data_dict["params"]["passed_data"].get(
         "mlr_predict_entity_id", "sensor.mlr_predict"
     )
+    mlr_predict_device_class = input_data_dict["params"]["passed_data"].get(
+        "mlr_predict_device_class", "power"
+    )
     mlr_predict_unit_of_measurement = input_data_dict["params"]["passed_data"].get(
-        "mlr_predict_unit_of_measurement", "h"
+        "mlr_predict_unit_of_measurement", "W"
     )
     mlr_predict_friendly_name = input_data_dict["params"]["passed_data"].get(
         "mlr_predict_friendly_name", "mlr predictor"
@@ -997,6 +1126,7 @@ def regressor_model_predict(
             prediction,
             idx,
             mlr_predict_entity_id,
+            mlr_predict_device_class,
             mlr_predict_unit_of_measurement,
             mlr_predict_friendly_name,
             type_var="mlregressor",
@@ -1007,10 +1137,10 @@ def regressor_model_predict(
 def publish_data(
     input_data_dict: dict,
     logger: logging.Logger,
-    save_data_to_file: Optional[bool] = False,
-    opt_res_latest: Optional[pd.DataFrame] = None,
-    entity_save: Optional[bool] = False,
-    dont_post: Optional[bool] = False,
+    save_data_to_file: bool | None = False,
+    opt_res_latest: pd.DataFrame | None = None,
+    entity_save: bool | None = False,
+    dont_post: bool | None = False,
 ) -> pd.DataFrame:
     """
     Publish the data obtained from the optimization results.
@@ -1038,9 +1168,7 @@ def publish_data(
 
     # Check if a day ahead optimization has been performed (read CSV file)
     if save_data_to_file:
-        today = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         filename = "opt_res_dayahead_" + today.strftime("%Y_%m_%d") + ".csv"
     # If publish_prefix is passed, check if there is saved entities in data_path/entities with prefix, publish to results
     elif params["passed_data"].get("publish_prefix", "") != "" and not dont_post:
@@ -1125,6 +1253,7 @@ def publish_data(
         opt_res_latest["P_PV"],
         idx_closest,
         custom_pv_forecast_id["entity_id"],
+        "power",
         custom_pv_forecast_id["unit_of_measurement"],
         custom_pv_forecast_id["friendly_name"],
         type_var="power",
@@ -1138,6 +1267,7 @@ def publish_data(
         opt_res_latest["P_Load"],
         idx_closest,
         custom_load_forecast_id["entity_id"],
+        "power",
         custom_load_forecast_id["unit_of_measurement"],
         custom_load_forecast_id["friendly_name"],
         type_var="power",
@@ -1153,6 +1283,7 @@ def publish_data(
             opt_res_latest["P_PV_curtailment"],
             idx_closest,
             custom_pv_curtailment_id["entity_id"],
+            "power",
             custom_pv_curtailment_id["unit_of_measurement"],
             custom_pv_curtailment_id["friendly_name"],
             type_var="power",
@@ -1168,6 +1299,7 @@ def publish_data(
             opt_res_latest["P_hybrid_inverter"],
             idx_closest,
             custom_hybrid_inverter_id["entity_id"],
+            "power",
             custom_hybrid_inverter_id["unit_of_measurement"],
             custom_hybrid_inverter_id["friendly_name"],
             type_var="power",
@@ -1181,16 +1313,17 @@ def publish_data(
         "custom_deferrable_forecast_id"
     ]
     for k in range(input_data_dict["opt"].optim_conf["number_of_deferrable_loads"]):
-        if "P_deferrable{}".format(k) not in opt_res_latest.columns:
+        if f"P_deferrable{k}" not in opt_res_latest.columns:
             logger.error(
-                "P_deferrable{}".format(k)
+                f"P_deferrable{k}"
                 + " was not found in results DataFrame. Optimization task may need to be relaunched or it did not converge to a solution.",
             )
         else:
             input_data_dict["rh"].post_data(
-                opt_res_latest["P_deferrable{}".format(k)],
+                opt_res_latest[f"P_deferrable{k}"],
                 idx_closest,
                 custom_deferrable_forecast_id[k]["entity_id"],
+                "power",
                 custom_deferrable_forecast_id[k]["unit_of_measurement"],
                 custom_deferrable_forecast_id[k]["friendly_name"],
                 type_var="deferrable",
@@ -1198,7 +1331,7 @@ def publish_data(
                 save_entities=entity_save,
                 dont_post=dont_post,
             )
-            cols_published = cols_published + ["P_deferrable{}".format(k)]
+            cols_published = cols_published + [f"P_deferrable{k}"]
     # Publish thermal model data (predicted temperature)
     custom_predicted_temperature_id = params["passed_data"][
         "custom_predicted_temperature_id"
@@ -1210,9 +1343,10 @@ def publish_data(
                 in input_data_dict["opt"].optim_conf["def_load_config"][k]
             ):
                 input_data_dict["rh"].post_data(
-                    opt_res_latest["predicted_temp_heater{}".format(k)],
+                    opt_res_latest[f"predicted_temp_heater{k}"],
                     idx_closest,
                     custom_predicted_temperature_id[k]["entity_id"],
+                    "temperature",
                     custom_predicted_temperature_id[k]["unit_of_measurement"],
                     custom_predicted_temperature_id[k]["friendly_name"],
                     type_var="temperature",
@@ -1220,7 +1354,7 @@ def publish_data(
                     save_entities=entity_save,
                     dont_post=dont_post,
                 )
-                cols_published = cols_published + ["predicted_temp_heater{}".format(k)]
+                cols_published = cols_published + [f"predicted_temp_heater{k}"]
     # Publish battery power
     if input_data_dict["opt"].optim_conf["set_use_battery"]:
         if "P_batt" not in opt_res_latest.columns:
@@ -1233,6 +1367,7 @@ def publish_data(
                 opt_res_latest["P_batt"],
                 idx_closest,
                 custom_batt_forecast_id["entity_id"],
+                "power",
                 custom_batt_forecast_id["unit_of_measurement"],
                 custom_batt_forecast_id["friendly_name"],
                 type_var="batt",
@@ -1248,6 +1383,7 @@ def publish_data(
                 opt_res_latest["SOC_opt"] * 100,
                 idx_closest,
                 custom_batt_soc_forecast_id["entity_id"],
+                "battery",
                 custom_batt_soc_forecast_id["unit_of_measurement"],
                 custom_batt_soc_forecast_id["friendly_name"],
                 type_var="SOC",
@@ -1262,6 +1398,7 @@ def publish_data(
         opt_res_latest["P_grid"],
         idx_closest,
         custom_grid_forecast_id["entity_id"],
+        "power",
         custom_grid_forecast_id["unit_of_measurement"],
         custom_grid_forecast_id["friendly_name"],
         type_var="power",
@@ -1277,6 +1414,7 @@ def publish_data(
         opt_res_latest[col_cost_fun],
         idx_closest,
         custom_cost_fun_id["entity_id"],
+        "monetary",
         custom_cost_fun_id["unit_of_measurement"],
         custom_cost_fun_id["friendly_name"],
         type_var="cost_fun",
@@ -1297,6 +1435,7 @@ def publish_data(
             opt_res_latest["optim_status"],
             idx_closest,
             custom_cost_fun_id["entity_id"],
+            "",
             custom_cost_fun_id["unit_of_measurement"],
             custom_cost_fun_id["friendly_name"],
             type_var="optim_status",
@@ -1311,6 +1450,7 @@ def publish_data(
         opt_res_latest["unit_load_cost"],
         idx_closest,
         custom_unit_load_cost_id["entity_id"],
+        "monetary",
         custom_unit_load_cost_id["unit_of_measurement"],
         custom_unit_load_cost_id["friendly_name"],
         type_var="unit_load_cost",
@@ -1325,6 +1465,7 @@ def publish_data(
         opt_res_latest["unit_prod_price"],
         idx_closest,
         custom_unit_prod_price_id["entity_id"],
+        "monetary",
         custom_unit_prod_price_id["unit_of_measurement"],
         custom_unit_prod_price_id["friendly_name"],
         type_var="unit_prod_price",
@@ -1386,7 +1527,7 @@ def continual_publish(
                     )
             # Retrieve entity metadata from file
             if os.path.isfile(entity_path / default_metadata_json):
-                with open(entity_path / default_metadata_json, "r") as file:
+                with open(entity_path / default_metadata_json) as file:
                     metadata = json.load(file)
                     # Check if freq should be shorter
                     if metadata.get("lowest_time_step", None) is not None:
@@ -1401,7 +1542,7 @@ def publish_json(
     input_data_dict: dict,
     entity_path: pathlib.Path,
     logger: logging.Logger,
-    reference: Optional[str] = "",
+    reference: str | None = "",
 ):
     """
     Extract saved entity data from .json (in data_path/entities), build entity, post results to post_data
@@ -1420,7 +1561,7 @@ def publish_json(
     """
     # Retrieve entity metadata from file
     if os.path.isfile(entity_path / default_metadata_json):
-        with open(entity_path / default_metadata_json, "r") as file:
+        with open(entity_path / default_metadata_json) as file:
             metadata = json.load(file)
     else:
         logger.error("unable to located metadata.json in:" + entity_path)
@@ -1462,6 +1603,7 @@ def publish_json(
         data_df=entity_data[metadata[entity_id]["name"]],
         idx=idx_closest,
         entity_id=entity_id,
+        device_class=dict.get(metadata[entity_id], "device_class"),
         unit_of_measurement=metadata[entity_id]["unit_of_measurement"],
         friendly_name=metadata[entity_id]["friendly_name"],
         type_var=metadata[entity_id].get("type_var", ""),

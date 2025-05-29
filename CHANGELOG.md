@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.13.3 - 2025-05-02
+### Improvement
+- Enhance optimization solver capabilities by adding HiGHS solver, improving thread configuration, and updating solver support across the project (@Crosenhain)
+- Update spelling and extended some error messages to include more troubleshooting information (@kcoffau)
+### Fix
+- Fixed incorrect indentation in a for loop, leaving relevant constraints out of the optimisation (@purcell_lab)
+
+## 0.13.2 - 2025-04-29
+### Improvement
+- Improved README and development documentation (@Crosenhain and @gieljnssns)
+- Improved forecasting and optimization classes logging (@purcell_lab)
+### Fix
+- Fixed ML Regressor for correct time zone treatment (@gieljnssns)
+- Fixed long standing problem to allow thermal and standard loads to be scheduled (@purcell_lab)
+- Fixing Missing files in python package issue (@pail23)
+- Fixed improper handling of home assistant API errors (@Gruek)
+- Remove an extraneous comma in the pd.to_datetime() method call in retrieve_hass.py (@GeoDerp)
+- Fixed the SettingWithCopyWarning Pandas problem and PV sensor handling when set_use_adjusted_pv is false (@paulhomes)
+
+## 0.13.1 - 2025-04-21
+### Improvement
+- Add timeout and thread configuration for different LP solvers (CBC, GLPK, COIN). Thanks to @GeoDerp
+- Clean up actions and add sourcery scan action. Thanks to @GeoDerp
+- Cache Open-Meteo JSON reponse locally to reduce the number of API calls and add resilience. Thanks to @paulhomes
+### Fix
+- Update default weight battery value in config_defaults.json. Thanks to @purcell-lab
+- Fix forecast output assignment and avoid SettingWithCopyWarning. Thanks to @radim2tej
+- Fix for get_mix_forecast ValueError: cannot convert float NaN to integer. Thanks to @paulhomes
+- Fix for hard-coded actual/forecast PV sensor names. Thanks to @paulhomes
+- Update pyproject.toml to solve issue #495: Missing files in python package after 0.12.5. Thanks to @GeoDerp
+
+## 0.13.0 - 2025-04-02
+### Improvement
+- Added a new feature to automatically adjust PV forecast using historical actual/forecast data
+- Added Support for multiple days forecasting with CSV data. Thanks to @nielskool for this contribution!
+- Refactored a new method `retrieve_home_assistant_data` in `command_line`
+- Unified default training data for ML algorithms using `data/long_train_data.pkl`
+- Added a presentation stack using `marp`
+### Fix
+- Fixed Value has dtype incompatible with int64 error, issue #465
+- Fixed Runtime "delta_forecast_daily" not recognized, issue #479
+- Attempt to fix Missing files in python package after 0.12.5, issue #495
+- Fixed workflow for macos tests
+
+## 0.12.8 - 2025-02-27
+### Improvement
+- Added a new method for weather forecast: open-meteo. This offers a very nice API to obtain weather forecasts. We are dropping the old scrapper method, if you were using the scapper method you just need to change the Weather forecast method to open-meteo
+- Added support to `device_class` definition when posting sensors to HA. Thanks to @paulhomes for this contribution
+- Improved github workflow Python testing
+- Updated documentation
+### Fix
+- Fixed TZ shift issue when using the typical load power forecaster
+
 ## 0.12.7 - 2025-02-16
 ### Improvement
 - A first batch of improvements (code reliability) proposed by SonarQube

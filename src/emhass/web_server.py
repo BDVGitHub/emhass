@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import argparse
 import json
@@ -10,12 +9,11 @@ import re
 import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Optional
 
+import jinja2
 import yaml
 from flask import Flask, make_response, request
 from flask import logging as log
-from jinja2 import Environment, PackageLoader
 from waitress import serve
 
 from emhass.command_line import (
@@ -52,6 +50,10 @@ params_secrets = {}
 continual_publish_thread = []
 injection_dict = {}
 
+templates = jinja2.Environment(
+    loader=jinja2.PackageLoader("emhass", "templates"),
+)
+
 
 def create_app(settings_override=None):
     """
@@ -83,7 +85,7 @@ def checkFileLog(refString=None) -> bool:
         )  # grab reduced log array (everything after string match)
     else:
         if (emhass_conf["data_path"] / "actionLogs.txt").exists():
-            with open(str(emhass_conf["data_path"] / "actionLogs.txt"), "r") as fp:
+            with open(str(emhass_conf["data_path"] / "actionLogs.txt")) as fp:
                 logArray = fp.readlines()
         else:
             app.logger.debug("Unable to obtain actionLogs.txt")
@@ -106,7 +108,7 @@ def grabLog(refString) -> list:
     isFound = []
     output = []
     if (emhass_conf["data_path"] / "actionLogs.txt").exists():
-        with open(str(emhass_conf["data_path"] / "actionLogs.txt"), "r") as fp:
+        with open(str(emhass_conf["data_path"] / "actionLogs.txt")) as fp:
             logArray = fp.readlines()
         # Find all string matches, log key (line Number) in isFound
         for x in range(len(logArray) - 1):
@@ -139,14 +141,6 @@ def index():
 
     """
     app.logger.info("EMHASS server online, serving index.html...")
-    # Load HTML template
-    file_loader = PackageLoader("emhass", "templates")
-    env = Environment(loader=file_loader)
-    # check if index.html exists
-    if "index.html" not in env.list_templates():
-        app.logger.error("Unable to find index.html in emhass module")
-        return make_response(["ERROR: unable to find index.html in emhass module"], 404)
-    template = env.get_template("index.html")
     # Load cached dict (if exists), to present generated plot tables
     if (emhass_conf["data_path"] / "injection_dict.pkl").exists():
         with open(str(emhass_conf["data_path"] / "injection_dict.pkl"), "rb") as fid:
@@ -161,6 +155,7 @@ def index():
     # basename = request.headers.get("X-Ingress-Path", "")
     # return make_response(template.render(injection_dict=injection_dict, basename=basename))
 
+    template = templates.get_template("index.html")
     return make_response(template.render(injection_dict=injection_dict))
 
 
@@ -176,16 +171,8 @@ def configuration():
     if (emhass_conf["data_path"] / "params.pkl").exists():
         with open(str(emhass_conf["data_path"] / "params.pkl"), "rb") as fid:
             emhass_conf["config_path"], params = pickle.load(fid)
-    # Load HTML template
-    file_loader = PackageLoader("emhass", "templates")
-    env = Environment(loader=file_loader)
-    # check if configuration.html exists
-    if "configuration.html" not in env.list_templates():
-        app.logger.error("Unable to find configuration.html in emhass module")
-        return make_response(
-            ["ERROR: unable to find configuration.html in emhass module"], 404
-        )
-    template = env.get_template("configuration.html")
+
+    template = templates.get_template("configuration.html")
     return make_response(template.render(config=params))
 
 
@@ -197,15 +184,6 @@ def template_action():
 
     """
     app.logger.info(" >> Sending rendered template table data")
-    file_loader = PackageLoader("emhass", "templates")
-    env = Environment(loader=file_loader)
-    # Check if template.html exists
-    if "template.html" not in env.list_templates():
-        app.logger.error("Unable to find template.html in emhass module")
-        return make_response(
-            ["WARNING: unable to find template.html in emhass module"], 404
-        )
-    template = env.get_template("template.html")
     if (emhass_conf["data_path"] / "injection_dict.pkl").exists():
         with open(str(emhass_conf["data_path"] / "injection_dict.pkl"), "rb") as fid:
             injection_dict = pickle.load(fid)
@@ -213,6 +191,8 @@ def template_action():
         app.logger.warning("Unable to obtain plot data from injection_dict.pkl")
         app.logger.warning("Try running an launch an optimization task")
         injection_dict = {}
+
+    template = templates.get_template("template.html")
     return make_response(template.render(injection_dict=injection_dict))
 
 
@@ -344,7 +324,6 @@ def parameter_set():
             json.dump(config, f, indent=4)
     else:
         return make_response(["Unable to save config file"], 500)
-    request_data
 
     # Save params with updated config
     if os.path.exists(emhass_conf["data_path"]):
@@ -551,7 +530,7 @@ def action_call(action_name):
 
 
 def main(
-    args: Optional[dict] = None,
+    args: dict | None = None,
 ):
     global continual_publish_thread
     global emhass_conf
@@ -709,7 +688,7 @@ def main(
     # Initialise continual publish thread list
     continual_publish_thread = []
 
-    # Launch server
+    # Logging
     port = int(os.environ.get("PORT", 5000))
     app.logger.info(
         "Launching the emhass webserver at: http://" + server_ip + ":" + str(port)
